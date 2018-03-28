@@ -1,0 +1,7 @@
+[package]
+name = "mem_bitness"
+version = "0.1.0"
+authors = ["Victor Milovanov"]
+
+[dependencies]
+lazy_static = "1.0.0"
