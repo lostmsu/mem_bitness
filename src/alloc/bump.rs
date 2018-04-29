@@ -1,10 +1,10 @@
 use std::cmp::PartialOrd;
-use std::heap::AllocErr;
+use std::alloc::AllocErr;
 use std::ops::Add;
 
 use alloc::{Alloc, Layout};
 
-pub struct BumpAllocator<PTR: Copy + Into<usize>> where
+pub struct BumpAllocator<PTR: Copy> where
     PTR: PartialOrd,
     PTR: Add<PTR, Output=PTR>,
 {
@@ -12,7 +12,7 @@ pub struct BumpAllocator<PTR: Copy + Into<usize>> where
     max: PTR,
 }
 
-impl<PTR: Copy + Into<usize>> BumpAllocator<PTR> where
+impl<PTR: Copy> BumpAllocator<PTR> where
     PTR: PartialOrd,
     PTR: Add<PTR, Output=PTR>,
 {
@@ -21,13 +21,13 @@ impl<PTR: Copy + Into<usize>> BumpAllocator<PTR> where
     }
 }
 
-unsafe impl<PTR: Copy + Into<usize>> Alloc<PTR> for BumpAllocator<PTR> where
+unsafe impl<PTR: Copy> Alloc<PTR> for BumpAllocator<PTR> where
     PTR: PartialOrd,
     PTR: Add<PTR, Output=PTR>,
 {
     unsafe fn alloc(&mut self, layout: Layout<PTR>) -> Result<PTR, AllocErr> {
         if self.current + layout.size() > self.max {
-            Err(AllocErr::Exhausted { request: layout.into() })
+            Err(AllocErr {})
         } else {
             let result = self.current;
             self.current = self.current + layout.size();
