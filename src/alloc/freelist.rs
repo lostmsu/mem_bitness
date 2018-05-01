@@ -181,7 +181,7 @@ for FreeList<'a, PTR, MEM> where
             new_preceding.max = new_max;
             preceding.write(self.memory, new_preceding);
         } else if self.is_valid_t(&succeding) {
-            let mut succeeding_value = succeding.read(self.memory);
+            let succeeding_value = succeding.read(self.memory);
             let new_succeeding_ptr = TypedPtr::new(ptr);
             new_succeeding_ptr.write(self.memory, succeeding_value);
             self.set_next(pre_succeeding, new_succeeding_ptr);
@@ -192,7 +192,7 @@ for FreeList<'a, PTR, MEM> where
         } else {
             let region = Node {
                 max: ptr + layout.size() - 1.into(),
-                next: self.free,
+                next: self.free.clone(),
             };
             let region_ptr = TypedPtr::new(ptr);
             region_ptr.write(self.memory, region);
