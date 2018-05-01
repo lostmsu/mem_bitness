@@ -7,13 +7,15 @@ use alloc::{Alloc, Layout};
 use typed_ptr::TypedPtr;
 use super::super::Memory;
 
+type NodePtr<PTR> = TypedPtr<Node<PTR>,PTR>;
+
 pub struct FreeList<'a, PTR: Copy + From<usize>, MEM: 'a + Memory<PTR>> where
     PTR: PartialOrd + PartialEq,
     PTR: Add<PTR, Output=PTR>,
     PTR: Sub<PTR, Output=PTR>,
 {
     start: PTR,
-    free: TypedPtr<Node<PTR>, PTR>,
+    free: NodePtr<PTR>,
     max: PTR,
     memory: &'a mut MEM,
 }
@@ -24,7 +26,7 @@ struct Node<PTR: Copy + PartialOrd + PartialEq + Clone>{
     next: TypedPtr<Node<PTR>, PTR>,
 }
 
-impl<PTR: Copy + Sub<PTR, Output=PTR> + Add<PTR, Output=PTR> + From<usize>> TypedPtr<Node<PTR>, PTR>
+impl<PTR: Copy + Sub<PTR, Output=PTR> + Add<PTR, Output=PTR> + From<usize>> NodePtr<PTR>
 where PTR: PartialOrd + PartialEq {
     pub unsafe fn size<MEM: Memory<PTR>>(&self, memory: &MEM) -> PTR {
         let max = self.read(memory).max;
@@ -38,7 +40,7 @@ impl<'a, PTR: Copy + From<usize>, MEM: Memory<PTR>> FreeList<'a, PTR, MEM> where
     PTR: Sub<PTR, Output=PTR>,
 {
     pub unsafe fn new(memory: &'a mut MEM, beginning: PTR, max: PTR) -> Self {
-        let free_node_layout = Layout::new_unchecked::<TypedPtr<Node<PTR>, PTR>>();
+        let free_node_layout = Layout::new_unchecked::<NodePtr<PTR>>();
         if beginning + free_node_layout.size() <= max {
             panic!("memory region is too small")
         };
@@ -46,7 +48,7 @@ impl<'a, PTR: Copy + From<usize>, MEM: Memory<PTR>> FreeList<'a, PTR, MEM> where
             max: max,
             next: FreeList::<'a, PTR, MEM>::invalid_t(beginning, max),
         };
-        let head_ptr = TypedPtr::new(beginning);
+        let head_ptr = NodePtr::new(beginning);
         head_ptr.write(memory, free_node);
         FreeList{start: beginning, max, free: head_ptr, memory}
     }
@@ -58,7 +60,7 @@ impl<'a, PTR: Copy + From<usize>, MEM: Memory<PTR>> FreeList<'a, PTR, MEM> where
     }
     fn invalid<T>(&self) -> TypedPtr<T, PTR>{Self::invalid_t::<T>(self.start, self.max)}
 
-    fn traverse<F: FnMut(TypedPtr<Node<PTR>, PTR>)>(&self, mut f: F) {
+    fn traverse<F: FnMut(NodePtr<PTR>)>(&self, mut f: F) {
         let mut current = self.free.clone();
         while self.is_valid(current.address()) {
             f(current.clone());
@@ -66,7 +68,7 @@ impl<'a, PTR: Copy + From<usize>, MEM: Memory<PTR>> FreeList<'a, PTR, MEM> where
         }
     }
 
-    fn traverse_while<F: FnMut(TypedPtr<Node<PTR>, PTR>) -> bool>(&self, mut f: F) -> bool {
+    fn traverse_while<F: FnMut(NodePtr<PTR>) -> bool>(&self, mut f: F) -> bool {
         let mut current = self.free.clone();
         while self.is_valid_t(&current) {
             if !f(current.clone()){
@@ -77,7 +79,7 @@ impl<'a, PTR: Copy + From<usize>, MEM: Memory<PTR>> FreeList<'a, PTR, MEM> where
         return false;
     }
 
-    fn remove(&mut self, node: TypedPtr<Node<PTR>, PTR>, prev: TypedPtr<Node<PTR>, PTR>){
+    fn remove(&mut self, node: NodePtr<PTR>, prev: NodePtr<PTR>){
         if !self.is_valid_t(&node){
             panic!("bad node");
         }
@@ -95,7 +97,7 @@ impl<'a, PTR: Copy + From<usize>, MEM: Memory<PTR>> FreeList<'a, PTR, MEM> where
         }
     }
 
-    unsafe fn set_next(&mut self, node_or_invalid: TypedPtr<Node<PTR>, PTR>, next: TypedPtr<Node<PTR>, PTR>){
+    unsafe fn set_next(&mut self, node_or_invalid: NodePtr<PTR>, next: NodePtr<PTR>){
         if self.is_valid_t(&node_or_invalid){
             let mut node_value = node_or_invalid.read(self.memory);
             node_value.next = next;
@@ -127,7 +129,7 @@ for FreeList<'a, PTR, MEM> where
             return Err(AllocErr {});
         }
 
-        let free_node_layout = Layout::<PTR>::new_unchecked::<TypedPtr<Node<PTR>, PTR>>();
+        let free_node_layout = Layout::<PTR>::new_unchecked::<NodePtr<PTR>>();
         let mut node = target.read(self.memory);
         let size = target.size(self.memory);
         if free_node_layout.size() + layout.size() <= size {
@@ -145,7 +147,7 @@ for FreeList<'a, PTR, MEM> where
     }
 
     unsafe fn dealloc(&mut self, ptr: PTR, layout: Layout<PTR>) {
-        let free_node_layout = Layout::<PTR>::new_unchecked::<TypedPtr<Node<PTR>, PTR>>();
+        let free_node_layout = Layout::<PTR>::new_unchecked::<NodePtr<PTR>>();
         if layout.size() < free_node_layout.size() {
             // TODO that's a problem: we can't deallocate anything too small
             panic!("bad dealloc layout")
@@ -182,7 +184,7 @@ for FreeList<'a, PTR, MEM> where
             preceding.write(self.memory, new_preceding);
         } else if self.is_valid_t(&succeding) {
             let succeeding_value = succeding.read(self.memory);
-            let new_succeeding_ptr = TypedPtr::new(ptr);
+            let new_succeeding_ptr = NodePtr::new(ptr);
             new_succeeding_ptr.write(self.memory, succeeding_value);
             self.set_next(pre_succeeding, new_succeeding_ptr);
         } else if self.is_valid_t(&preceding){
@@ -194,7 +196,7 @@ for FreeList<'a, PTR, MEM> where
                 max: ptr + layout.size() - 1.into(),
                 next: self.free.clone(),
             };
-            let region_ptr = TypedPtr::new(ptr);
+            let region_ptr = NodePtr::new(ptr);
             region_ptr.write(self.memory, region);
             self.free = region_ptr;
         }
