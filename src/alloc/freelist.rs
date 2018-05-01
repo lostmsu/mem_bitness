@@ -58,6 +58,14 @@ impl<'a, PTR: Copy + From<usize>, MEM: Memory<PTR>> FreeList<'a, PTR, MEM> where
     }
     fn invalid<T>(&self) -> TypedPtr<T, PTR>{Self::invalid_t::<T>(self.start, self.max)}
 
+    fn traverse<F: FnMut(TypedPtr<Node<PTR>, PTR>)>(&self, mut f: F) {
+        let mut current = self.free.clone();
+        while self.is_valid(current.address()) {
+            f(current.clone());
+            current = unsafe { current.read(self.memory).next }
+        }
+    }
+
     fn traverse_while<F: FnMut(TypedPtr<Node<PTR>, PTR>) -> bool>(&self, mut f: F) -> bool {
         let mut current = self.free.clone();
         while self.is_valid_t(&current) {
@@ -67,6 +75,34 @@ impl<'a, PTR: Copy + From<usize>, MEM: Memory<PTR>> FreeList<'a, PTR, MEM> where
             current = unsafe { current.read(self.memory).next }
         }
         return false;
+    }
+
+    fn remove(&mut self, node: TypedPtr<Node<PTR>, PTR>, prev: TypedPtr<Node<PTR>, PTR>){
+        if !self.is_valid_t(&node){
+            panic!("bad node");
+        }
+        if self.is_valid_t(&prev) {
+            let mut prev_node = unsafe { prev.read(self.memory) };
+            if prev_node.next != node {
+                panic!("bad prev node");
+            }
+            prev_node.next = unsafe { node.read(self.memory) }.next;
+        } else {
+            if self.free != node {
+                panic!("prev is missing, but the node is not the first");
+            }
+            self.free = unsafe { node.read(self.memory) }.next;
+        }
+    }
+
+    unsafe fn set_next(&mut self, node_or_invalid: TypedPtr<Node<PTR>, PTR>, next: TypedPtr<Node<PTR>, PTR>){
+        if self.is_valid_t(&node_or_invalid){
+            let mut node_value = node_or_invalid.read(self.memory);
+            node_value.next = next;
+            node_or_invalid.write(self.memory, node_value);
+        } else {
+            self.free = next;
+        }
     }
 }
 
@@ -100,20 +136,67 @@ for FreeList<'a, PTR, MEM> where
             target.write(self.memory, node);
             return Ok(result)
         } else {
+            // this will leak memory, because some of it at the end
+            // (< sizeof(Node)) might become untracked
             let result = target.address();
-            let next = target.read(self.memory).next;
-            if self.is_valid_t(&prev) {
-                let mut prev_mut = prev.read(self.memory);
-                prev_mut.next = next;
-                prev.write(self.memory, prev_mut);
-            } else{
-                self.free = next;
-            }
+            self.remove(target, prev);
             return Ok(result);
         }
     }
 
-    unsafe fn dealloc(&mut self, _ptr: PTR, _layout: Layout<PTR>) {
-        panic!("Not implemented")
+    unsafe fn dealloc(&mut self, ptr: PTR, layout: Layout<PTR>) {
+        let free_node_layout = Layout::<PTR>::new_unchecked::<TypedPtr<Node<PTR>, PTR>>();
+        if layout.size() < free_node_layout.size() {
+            // TODO that's a problem: we can't deallocate anything too small
+            panic!("bad dealloc layout")
+        }
+        if !self.is_valid(ptr){
+            panic!("bad ptr")
+        }
+        if ptr + layout.size() > self.max + 1.into() {
+            panic!("region past max ptr")
+        }
+
+        let mut preceding = self.invalid();
+        let mut prev = self.invalid();
+        let mut pre_succeeding = self.invalid();
+        let mut succeding = self.invalid();
+        self.traverse(|free| {
+            let node = free.read(self.memory);
+            if node.max + 1.into() == ptr {
+                preceding = free.clone();
+                pre_succeeding = prev.clone();
+            }
+            if ptr + layout.size() == free.address() {
+                succeding = free.clone();
+            }
+
+            prev = free.clone();
+        });
+
+        if self.is_valid_t(&succeding) && self.is_valid_t(&preceding) {
+            let new_max = succeding.read(self.memory).max;
+            self.remove(succeding, pre_succeeding);
+            let mut new_preceding = preceding.read(self.memory);
+            new_preceding.max = new_max;
+            preceding.write(self.memory, new_preceding);
+        } else if self.is_valid_t(&succeding) {
+            let mut succeeding_value = succeding.read(self.memory);
+            let new_succeeding_ptr = TypedPtr::new(ptr);
+            new_succeeding_ptr.write(self.memory, succeeding_value);
+            self.set_next(pre_succeeding, new_succeeding_ptr);
+        } else if self.is_valid_t(&preceding){
+            let mut preceding_value = preceding.read(self.memory);
+            preceding_value.max = preceding_value.max + layout.size();
+            preceding.write(self.memory, preceding_value);
+        } else {
+            let region = Node {
+                max: ptr + layout.size() - 1.into(),
+                next: self.free,
+            };
+            let region_ptr = TypedPtr::new(ptr);
+            region_ptr.write(self.memory, region);
+            self.free = region_ptr;
+        }
     }
 }
