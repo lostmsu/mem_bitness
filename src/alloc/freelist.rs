@@ -1,6 +1,6 @@
 use std::cmp::PartialOrd;
 use std::alloc::AllocErr;
-use std::ops::{Add, Sub};
+use std::ops::{Add, Sub, BitAnd, Not};
 
 use alloc::{Alloc, Layout};
 
@@ -8,11 +8,14 @@ use typed_ptr::TypedPtr;
 use super::super::Memory;
 
 type NodePtr<PTR> = TypedPtr<Node<PTR>,PTR>;
+type BlockPtr<PTR> = TypedPtr<Block<PTR>,PTR>;
 
 pub struct FreeList<'a, PTR: Copy + From<usize>, MEM: 'a + Memory<PTR>> where
     PTR: PartialOrd + PartialEq,
     PTR: Add<PTR, Output=PTR>,
     PTR: Sub<PTR, Output=PTR>,
+    PTR: BitAnd<PTR, Output=PTR>,
+    PTR: Not<Output=PTR>,
 {
     start: PTR,
     free: NodePtr<PTR>,
@@ -24,6 +27,20 @@ pub struct FreeList<'a, PTR: Copy + From<usize>, MEM: 'a + Memory<PTR>> where
 struct Node<PTR: Copy + PartialOrd + PartialEq + Clone>{
     max: PTR,
     next: TypedPtr<Node<PTR>, PTR>,
+}
+
+impl<PTR: Copy + PartialOrd + PartialEq + Clone + From<usize>> Node<PTR> {
+    fn layout() -> Layout<PTR> { unsafe { Layout::new_unchecked::<Node<PTR>>() } }
+}
+
+#[derive(Clone)]
+struct Block<PTR: Copy + Clone> {
+    start: PTR,
+    end: PTR,
+}
+
+impl <PTR: Copy + Clone + From<usize>> Block<PTR> {
+    fn layout() -> Layout<PTR> { unsafe { Layout::new_unchecked::<Block<PTR>>() } }
 }
 
 impl<PTR: Copy + Sub<PTR, Output=PTR> + Add<PTR, Output=PTR> + From<usize>> NodePtr<PTR>
@@ -38,9 +55,11 @@ impl<'a, PTR: Copy + From<usize>, MEM: Memory<PTR>> FreeList<'a, PTR, MEM> where
     PTR: PartialOrd + PartialEq,
     PTR: Add<PTR, Output=PTR>,
     PTR: Sub<PTR, Output=PTR>,
+    PTR: BitAnd<PTR, Output=PTR>,
+    PTR: Not<Output=PTR>,
 {
     pub unsafe fn new(memory: &'a mut MEM, beginning: PTR, max: PTR) -> Self {
-        let free_node_layout = Layout::new_unchecked::<NodePtr<PTR>>();
+        let free_node_layout = Node::layout();
         if beginning + free_node_layout.size() <= max {
             panic!("memory region is too small")
         };
@@ -59,6 +78,33 @@ impl<'a, PTR: Copy + From<usize>, MEM: Memory<PTR>> FreeList<'a, PTR, MEM> where
         unsafe { TypedPtr::new(max + 1.into()) }
     }
     fn invalid<T>(&self) -> TypedPtr<T, PTR>{Self::invalid_t::<T>(self.start, self.max)}
+    fn minimum_free_block_total_size(&self) -> PTR {
+        let node_layout = Node::<PTR>::layout();
+        let empty_size = node_layout.align_offset(1.into()) + node_layout.size();
+        let allocated_layout = Block::<PTR>::layout();
+        let allocated_size = allocated_layout.align_offset(1.into()) + allocated_layout.size();
+        if allocated_size > empty_size { allocated_size } else { empty_size }
+    }
+
+    fn fits(&self, free_block: NodePtr<PTR>, layout: &Layout<PTR>) -> bool {
+        if !self.is_valid_t(&free_block){
+            panic!("invalid free block");
+        }
+        if layout.size() <= 0.into() {
+            panic!("invalid layout");
+        }
+
+        let block_start = free_block.address();
+        let block_end_inclusive = unsafe { free_block.read(self.memory).max };
+
+        let free_node_layout = Node::layout();
+        let block_metadata_layout = Block::layout();
+
+        let data_start = layout.align_offset(block_start);
+        let metadata_start = block_metadata_layout.align_offset(data_start + layout.size());
+        let metadata_end_exclusive = free_node_layout.align_offset(metadata_start + block_metadata_layout.size());
+        block_end_inclusive + 1.into() >= metadata_end_exclusive
+    }
 
     fn traverse<F: FnMut(NodePtr<PTR>)>(&self, mut f: F) {
         let mut current = self.free.clone();
@@ -113,6 +159,8 @@ for FreeList<'a, PTR, MEM> where
     PTR: PartialOrd + PartialEq,
     PTR: Add<PTR, Output=PTR>,
     PTR: Sub<PTR, Output=PTR>,
+    PTR: BitAnd<PTR, Output=PTR>,
+    PTR: Not<Output=PTR>,
 {
     unsafe fn alloc(&mut self, layout: Layout<PTR>) -> Result<PTR, AllocErr> {
         if layout.size() == 0.into() {
@@ -124,32 +172,43 @@ for FreeList<'a, PTR, MEM> where
         if !self.traverse_while(|free| {
             prev = target.clone();
             target = free.clone();
-            return free.size(self.memory) < layout.size();
+            return self.fits(free, &layout);
         }){
             return Err(AllocErr {});
         }
 
         let free_node_layout = Layout::<PTR>::new_unchecked::<NodePtr<PTR>>();
-        let mut node = target.read(self.memory);
-        let size = target.size(self.memory);
-        if free_node_layout.size() + layout.size() <= size {
-            node.max = node.max - layout.size();
-            let result = node.max + 1.into();
-            target.write(self.memory, node);
-            return Ok(result)
-        } else {
-            // this will leak memory, because some of it at the end
-            // (< sizeof(Node)) might become untracked
-            let result = target.address();
-            self.remove(target, prev);
-            return Ok(result);
+        let node = target.read(self.memory);
+
+        let block_start = target.address();
+        let block_end_exclusive = target.read(self.memory).max + 1.into();
+        let block_metadata_layout = Block::layout();
+
+        let data_start = layout.align_offset(block_start);
+        let metadata_start = block_metadata_layout.align_offset(data_start + layout.size());
+        let metadata_end_exclusive = free_node_layout.align_offset(metadata_start + block_metadata_layout.size());
+        if block_end_exclusive < metadata_end_exclusive {
+            panic!("internal miscalculation");
         }
+        let metadata;
+
+        if metadata_end_exclusive + self.minimum_free_block_total_size() <= block_end_exclusive {
+            let new_free_start = NodePtr::new(metadata_end_exclusive);
+            new_free_start.write(self.memory, node);
+            metadata = Block { start: block_start, end: block_end_exclusive - 1.into() };
+            self.set_next(prev, new_free_start);
+        } else {
+            metadata = Block { start: block_start, end: block_end_exclusive - 1.into() };
+            self.remove(target, prev);
+        }
+
+        BlockPtr::new(metadata_start).write(self.memory, metadata);
+
+        Ok(data_start)
     }
 
     unsafe fn dealloc(&mut self, ptr: PTR, layout: Layout<PTR>) {
-        let free_node_layout = Layout::<PTR>::new_unchecked::<NodePtr<PTR>>();
-        if layout.size() < free_node_layout.size() {
-            // TODO that's a problem: we can't deallocate anything too small
+        if layout.size() <= 0.into() {
             panic!("bad dealloc layout")
         }
         if !self.is_valid(ptr){
@@ -159,17 +218,21 @@ for FreeList<'a, PTR, MEM> where
             panic!("region past max ptr")
         }
 
+        let block_metadata_layout = Block::layout();
+        let metadata_start = block_metadata_layout.align_offset(ptr + layout.size());
+        let metadata = BlockPtr::new(metadata_start).read(self.memory);
+
         let mut preceding = self.invalid();
         let mut prev = self.invalid();
         let mut pre_succeeding = self.invalid();
         let mut succeding = self.invalid();
         self.traverse(|free| {
             let node = free.read(self.memory);
-            if node.max + 1.into() == ptr {
+            if node.max + 1.into() == metadata.start {
                 preceding = free.clone();
                 pre_succeeding = prev.clone();
             }
-            if ptr + layout.size() == free.address() {
+            if metadata.end + 1.into() == free.address() {
                 succeding = free.clone();
             }
 
@@ -184,19 +247,19 @@ for FreeList<'a, PTR, MEM> where
             preceding.write(self.memory, new_preceding);
         } else if self.is_valid_t(&succeding) {
             let succeeding_value = succeding.read(self.memory);
-            let new_succeeding_ptr = NodePtr::new(ptr);
+            let new_succeeding_ptr = NodePtr::new(metadata.start);
             new_succeeding_ptr.write(self.memory, succeeding_value);
             self.set_next(pre_succeeding, new_succeeding_ptr);
         } else if self.is_valid_t(&preceding){
             let mut preceding_value = preceding.read(self.memory);
-            preceding_value.max = preceding_value.max + layout.size();
+            preceding_value.max = metadata.end;
             preceding.write(self.memory, preceding_value);
         } else {
             let region = Node {
-                max: ptr + layout.size() - 1.into(),
+                max: metadata.end,
                 next: self.free.clone(),
             };
-            let region_ptr = NodePtr::new(ptr);
+            let region_ptr = NodePtr::new(metadata.start);
             region_ptr.write(self.memory, region);
             self.free = region_ptr;
         }
