@@ -4,12 +4,12 @@ use std::ptr;
 
 use memory::Memory;
 
-pub struct MemoryRegion<PTR: Into<usize>> {
+pub struct MemoryRegion<PTR: Into<usize> + Copy> {
     data: Vec<u8>,
     phantom: PhantomData<PTR>,
 }
 
-impl<PTR: Into<usize>> MemoryRegion<PTR> {
+impl<PTR: Into<usize> + Copy> MemoryRegion<PTR> {
     pub fn new(max: PTR) -> MemoryRegion<PTR> {
         MemoryRegion {
             data: vec![0; max.into()],
@@ -18,7 +18,7 @@ impl<PTR: Into<usize>> MemoryRegion<PTR> {
     }
 }
 
-impl<PTR: Into<usize>> Memory<PTR> for MemoryRegion<PTR> {
+impl<PTR: Into<usize> + Copy> Memory<PTR> for MemoryRegion<PTR> {
     unsafe fn read<T>(&self, ptr: PTR) -> T {
         let read_at = self.data.as_ptr().offset(ptr.into() as isize);
         ptr::read(read_at as *const T)
