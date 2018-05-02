@@ -220,7 +220,7 @@ for FreeList<'a, PTR, MEM> where
         if metadata_end_exclusive + self.minimum_free_block_total_size() <= block_end_exclusive {
             let new_free_start = NodePtr::new(metadata_end_exclusive);
             self.write_node(&new_free_start, node);
-            metadata = Block { start: block_start, end: block_end_exclusive - 1.into() };
+            metadata = Block { start: block_start, end: metadata_end_exclusive - 1.into() };
             self.set_next(prev, new_free_start);
         } else {
             metadata = Block { start: block_start, end: block_end_exclusive - 1.into() };
