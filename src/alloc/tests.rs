@@ -103,6 +103,8 @@ unsafe fn allocator_sanity_test<A: Alloc<PTR>, PTR: Copy + From<usize>>(allocato
     for p in allocated.iter() {
         allocator.dealloc(*p, layout.clone());
     }
+    
+    allocated.clear();
 
     ensure_can_alloc(allocator, layout.clone());
 
@@ -111,6 +113,8 @@ unsafe fn allocator_sanity_test<A: Alloc<PTR>, PTR: Copy + From<usize>>(allocato
     for p in allocated.iter().rev() {
         allocator.dealloc(*p, layout.clone());
     }
+
+    allocated.clear();
 
     ensure_can_alloc(allocator, layout.clone());
 }
