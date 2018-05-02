@@ -255,9 +255,9 @@ for FreeList<'a, PTR, MEM> where
             let node = free.read(self.memory);
             if node.max + 1.into() == metadata.start {
                 preceding = free.clone();
-                pre_succeeding = prev.clone();
             }
             if metadata.end + 1.into() == free.address() {
+                pre_succeeding = prev.clone();
                 succeding = free.clone();
             }
 
