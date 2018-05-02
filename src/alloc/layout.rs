@@ -1,6 +1,7 @@
 use std::alloc;
 use std::ops::{Add, Sub, BitAnd, Not};
 
+#[derive(Copy)]
 pub struct Layout<PTR: Copy>
 {
     size: PTR,
