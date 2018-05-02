@@ -60,7 +60,7 @@ impl<'a, PTR: Copy + From<usize>, MEM: Memory<PTR>> FreeList<'a, PTR, MEM> where
 {
     pub unsafe fn new(memory: &'a mut MEM, beginning: PTR, max: PTR) -> Self {
         let free_node_layout = Node::layout();
-        if beginning + free_node_layout.size() <= max {
+        if beginning + free_node_layout.size() >= max {
             panic!("memory region is too small")
         };
         let free_node = Node {
@@ -110,7 +110,11 @@ impl<'a, PTR: Copy + From<usize>, MEM: Memory<PTR>> FreeList<'a, PTR, MEM> where
         let mut current = self.free.clone();
         while self.is_valid(current.address()) {
             f(current.clone());
-            current = unsafe { current.read(self.memory).next }
+            let next = unsafe { current.read(self.memory).next };
+            if next == current {
+                panic!("self-loop in traverse")
+            }
+            current = next;
         }
     }
 
@@ -120,7 +124,11 @@ impl<'a, PTR: Copy + From<usize>, MEM: Memory<PTR>> FreeList<'a, PTR, MEM> where
             if !f(current.clone()){
                 return true;
             }
-            current = unsafe { current.read(self.memory).next }
+            let next = unsafe { current.read(self.memory).next };
+            if next == current {
+                panic!("self-loop in traverse")
+            }
+            current = next;
         }
         return false;
     }
@@ -135,6 +143,9 @@ impl<'a, PTR: Copy + From<usize>, MEM: Memory<PTR>> FreeList<'a, PTR, MEM> where
                 panic!("bad prev node");
             }
             prev_node.next = unsafe { node.read(self.memory) }.next;
+            if prev_node.next == prev {
+                panic!("remove self-loop");
+            }
         } else {
             if self.free != node {
                 panic!("prev is missing, but the node is not the first");
@@ -146,11 +157,24 @@ impl<'a, PTR: Copy + From<usize>, MEM: Memory<PTR>> FreeList<'a, PTR, MEM> where
     unsafe fn set_next(&mut self, node_or_invalid: NodePtr<PTR>, next: NodePtr<PTR>){
         if self.is_valid_t(&node_or_invalid){
             let mut node_value = node_or_invalid.read(self.memory);
-            node_value.next = next;
-            node_or_invalid.write(self.memory, node_value);
+            node_value.next = next.clone();
+            if node_or_invalid == next {
+                panic!("set_next self-loop");
+            }
+            self.write_node(&node_or_invalid, node_value);
         } else {
             self.free = next;
         }
+    }
+
+    unsafe fn write_node(&mut self, to: &NodePtr<PTR>, node: Node<PTR>) {
+        if node.next == *to {
+            panic!("making a loop!")
+        }
+        if self.is_valid_t(&node.next) & (node.next >= *to) & (node.next.address() <= node.max) {
+            panic!("next node can't be within this node!")
+        }
+        to.write(self.memory, node);
     }
 }
 
@@ -172,7 +196,8 @@ for FreeList<'a, PTR, MEM> where
         if !self.traverse_while(|free| {
             prev = target.clone();
             target = free.clone();
-            return self.fits(free, &layout);
+            let continue_search = !self.fits(free, &layout);
+            continue_search
         }){
             return Err(AllocErr {});
         }
@@ -194,7 +219,7 @@ for FreeList<'a, PTR, MEM> where
 
         if metadata_end_exclusive + self.minimum_free_block_total_size() <= block_end_exclusive {
             let new_free_start = NodePtr::new(metadata_end_exclusive);
-            new_free_start.write(self.memory, node);
+            self.write_node(&new_free_start, node);
             metadata = Block { start: block_start, end: block_end_exclusive - 1.into() };
             self.set_next(prev, new_free_start);
         } else {
@@ -244,23 +269,23 @@ for FreeList<'a, PTR, MEM> where
             self.remove(succeding, pre_succeeding);
             let mut new_preceding = preceding.read(self.memory);
             new_preceding.max = new_max;
-            preceding.write(self.memory, new_preceding);
+            self.write_node(&preceding, new_preceding);
         } else if self.is_valid_t(&succeding) {
             let succeeding_value = succeding.read(self.memory);
             let new_succeeding_ptr = NodePtr::new(metadata.start);
-            new_succeeding_ptr.write(self.memory, succeeding_value);
+            self.write_node(&new_succeeding_ptr, succeeding_value);
             self.set_next(pre_succeeding, new_succeeding_ptr);
         } else if self.is_valid_t(&preceding){
             let mut preceding_value = preceding.read(self.memory);
             preceding_value.max = metadata.end;
-            preceding.write(self.memory, preceding_value);
+            self.write_node(&preceding, preceding_value);
         } else {
             let region = Node {
                 max: metadata.end,
                 next: self.free.clone(),
             };
             let region_ptr = NodePtr::new(metadata.start);
-            region_ptr.write(self.memory, region);
+            self.write_node(&region_ptr, region);
             self.free = region_ptr;
         }
     }
