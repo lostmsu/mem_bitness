@@ -1,4 +1,5 @@
 #![feature(allocator_api)]
+#![feature(placement_new_protocol)]
 
 #[macro_use]
 extern crate lazy_static;
